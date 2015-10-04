@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/xordataexchange/crypt/backend"
+	"github.com/jsipprell/crypt/backend"
 
 	goetcd "github.com/coreos/go-etcd/etcd"
 )

@@ -7,19 +7,50 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"path"
+	"strings"
 
-	"github.com/xordataexchange/crypt/backend"
-	"github.com/xordataexchange/crypt/backend/consul"
-	"github.com/xordataexchange/crypt/backend/etcd"
-	"github.com/xordataexchange/crypt/encoding/secconf"
+	"github.com/jsipprell/crypt/backend"
+	"github.com/jsipprell/crypt/backend/consul"
+	"github.com/jsipprell/crypt/backend/etcd"
+	"github.com/jsipprell/crypt/encoding/secconf"
+
+	"golang.org/x/crypto/openpgp"
 )
+
+const nodeRoot = "secure/storage"
+
+type pubkeyFilter []string
+
+func (pk pubkeyFilter) Entities(ents ...*openpgp.Entity) openpgp.EntityList {
+	el := make(openpgp.EntityList, 0, 1)
+
+entityFilterLoop:
+	for _, e := range ents {
+		for _, id := range e.Identities {
+			for _, k := range pk {
+				if strings.Contains(id.Name, k) {
+					el = append(el, e)
+
+					break entityFilterLoop
+				}
+			}
+		}
+	}
+
+	return el
+}
+
+func nodeKey(key string) string {
+	return path.Join(nodeRoot, key)
+}
 
 func getCmd(flagset *flag.FlagSet) {
 	flagset.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: %s get [args...] key\n", os.Args[0])
 		flagset.PrintDefaults()
 	}
-	flagset.StringVar(&secretKeyring, "secret-keyring", ".secring.gpg", "path to armored secret keyring")
+	flagset.StringVar(&secretKeyring, "secret-keyring", DefaultConfig.SecretKeyring, "path to armored secret keyring")
 	flagset.Parse(os.Args[2:])
 	key := flagset.Arg(0)
 	if key == "" {
@@ -30,15 +61,17 @@ func getCmd(flagset *flag.FlagSet) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	log.Printf("Looking at consul node %q\n", nodeKey(key))
 	if plaintext {
-		value, err := getPlain(key, backendStore)
+		value, err := getPlain(nodeKey(key), backendStore)
 		if err != nil {
 			log.Fatal(err)
 		}
 		fmt.Printf("%s\n", value)
 		return
 	}
-	value, err := getEncrypted(key, secretKeyring, backendStore)
+	value, err := getEncrypted(nodeKey(key), secretKeyring, backendStore)
 
 	if err != nil {
 		log.Fatal(err)
@@ -79,7 +112,7 @@ func listCmd(flagset *flag.FlagSet) {
 		fmt.Fprintf(os.Stderr, "usage: %s list [args...] key\n", os.Args[0])
 		flagset.PrintDefaults()
 	}
-	flagset.StringVar(&secretKeyring, "secret-keyring", ".secring.gpg", "path to armored secret keyring")
+	flagset.StringVar(&secretKeyring, "secret-keyring", DefaultConfig.SecretKeyring, "path to armored secret keyring")
 	flagset.Parse(os.Args[2:])
 	key := flagset.Arg(0)
 	if key == "" {
@@ -90,8 +123,9 @@ func listCmd(flagset *flag.FlagSet) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("Looking for consul nodes under %q\n", nodeKey(key))
 	if plaintext {
-		list, err := listPlain(key, backendStore)
+		list, err := listPlain(nodeKey(key), backendStore)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -100,7 +134,7 @@ func listCmd(flagset *flag.FlagSet) {
 		}
 		return
 	}
-	list, err := listEncrypted(key, secretKeyring, backendStore)
+	list, err := listEncrypted(nodeKey(key), secretKeyring, backendStore)
 
 	if err != nil {
 		log.Fatal(err)
@@ -144,13 +178,23 @@ func setCmd(flagset *flag.FlagSet) {
 		fmt.Fprintf(os.Stderr, "usage: %s set [args...] key file\n", os.Args[0])
 		flagset.PrintDefaults()
 	}
-	flagset.StringVar(&keyring, "keyring", ".pubring.gpg", "path to armored public keyring")
+	flagset.StringVar(&keyring, "keyring", DefaultConfig.Keyring, "path to armored public keyring")
 	flagset.Parse(os.Args[2:])
 	key := flagset.Arg(0)
 	if key == "" {
 		flagset.Usage()
 		os.Exit(1)
 	}
+	keySelector := make(pubkeyFilter, 1)
+	p, node := path.Split(key)
+	for dir := strings.TrimRight(p, "/"); dir != node && dir != "" && dir != "/"; dir, _ = path.Split(p) {
+		p = strings.TrimRight(dir, "/")
+	}
+	if p == "" || p == "/" {
+		p = key
+	}
+	keySelector[0] = p
+
 	data := flagset.Arg(1)
 	if data == "" {
 		flagset.Usage()
@@ -165,15 +209,16 @@ func setCmd(flagset *flag.FlagSet) {
 		log.Fatal(err)
 	}
 
+	log.Printf("setting consul node %q\n", nodeKey(key))
 	if plaintext {
-		err := setPlain(key, backendStore, d)
+		err := setPlain(nodeKey(key), backendStore, d)
 		if err != nil {
 			log.Fatal(err)
 			return
 		}
 		return
 	}
-	err = setEncrypted(key, keyring, d, backendStore)
+	err = setEncrypted(nodeKey(key), keyring, d, backendStore, keySelector)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -186,13 +231,13 @@ func setPlain(key string, store backend.Store, d []byte) error {
 
 }
 
-func setEncrypted(key, keyring string, d []byte, store backend.Store) error {
+func setEncrypted(key, keyring string, d []byte, store backend.Store, keySelector pubkeyFilter) error {
 	kr, err := os.Open(keyring)
 	if err != nil {
 		return err
 	}
 	defer kr.Close()
-	secureValue, err := secconf.Encode(d, kr)
+	secureValue, err := secconf.EncodeWith(d, kr, keySelector)
 	if err != nil {
 		return err
 	}
