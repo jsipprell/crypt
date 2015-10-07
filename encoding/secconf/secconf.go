@@ -17,6 +17,8 @@ import (
 
 	"golang.org/x/crypto/openpgp"
 	"golang.org/x/crypto/ssh/terminal"
+
+	keyctl "github.com/jsipprell/keyctl/openpgp"
 )
 
 type EntityFilter interface {
@@ -68,6 +70,30 @@ func (fk *filterKeys) filter(keys []openpgp.Key, symmetric bool) ([]byte, error)
 		}
 	}
 	return nil, nil
+}
+
+// Deocde decodes data using the secconf codec.
+func DecodeVia(data []byte, secertKeyring io.Reader, p keyctl.PassphraseKeyring) ([]byte, error) {
+	decoder := base64.NewDecoder(base64.StdEncoding, bytes.NewBuffer(data))
+	entityList, err := openpgp.ReadKeyRing(secertKeyring)
+	if err != nil {
+		return nil, err
+	}
+
+	md, err := p.ReadMessage(decoder, entityList, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	gzReader, err := gzip.NewReader(md.UnverifiedBody)
+	if err != nil {
+		return nil, err
+	}
+	defer gzReader.Close()
+	bytes, err := ioutil.ReadAll(gzReader)
+	if err != nil {
+		return nil, err
+	}
+	return bytes, nil
 }
 
 // Deocde decodes data using the secconf codec.

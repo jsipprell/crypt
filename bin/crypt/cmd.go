@@ -15,12 +15,24 @@ import (
 	"github.com/jsipprell/crypt/backend/etcd"
 	"github.com/jsipprell/crypt/encoding/secconf"
 
+	"github.com/jsipprell/keyctl"
+	prompt "github.com/jsipprell/keyctl/openpgp"
+
 	"golang.org/x/crypto/openpgp"
 )
 
 const nodeRoot = "secure/storage"
+const passphraseTimeout = 3600
 
 type pubkeyFilter []string
+
+func SessionKeyring() (keyctl.Keyring, error) {
+	kr, err := keyctl.SessionKeyring()
+	if err == nil {
+		kr.SetDefaultTimeout(uint(passphraseTimeout))
+	}
+	return kr, err
+}
 
 func (pk pubkeyFilter) Entities(ents ...*openpgp.Entity) openpgp.EntityList {
 	el := make(openpgp.EntityList, 0, 1)
@@ -80,7 +92,11 @@ func getCmd(flagset *flag.FlagSet) {
 }
 
 func getEncrypted(key, keyring string, store backend.Store) ([]byte, error) {
-	var value []byte
+	var (
+		value    []byte
+		passring keyctl.Keyring
+		pkr      prompt.PassphraseKeyring
+	)
 	kr, err := os.Open(secretKeyring)
 	if err != nil {
 		return value, err
@@ -90,7 +106,16 @@ func getEncrypted(key, keyring string, store backend.Store) ([]byte, error) {
 	if err != nil {
 		return value, err
 	}
-	value, err = secconf.Decode(data, kr)
+	if passring, err = SessionKeyring(); err == nil {
+		pkr = prompt.PassphraseKeyring{Keyring: passring}
+	}
+
+	if passring != nil {
+		pkr.Prompt = prompt.NewPrompter(prompt.PassphrasePrompt)
+		value, err = secconf.DecodeVia(data, kr, pkr)
+	} else {
+		value, err = secconf.Decode(data, kr)
+	}
 	if err != nil {
 		return value, err
 	}
@@ -145,6 +170,10 @@ func listCmd(flagset *flag.FlagSet) {
 }
 
 func listEncrypted(key, keyring string, store backend.Store) (backend.KVPairs, error) {
+	var (
+		passring keyctl.Keyring
+		pkr      prompt.PassphraseKeyring
+	)
 	kr, err := os.Open(secretKeyring)
 	if err != nil {
 		return nil, err
@@ -155,8 +184,16 @@ func listEncrypted(key, keyring string, store backend.Store) (backend.KVPairs, e
 	if err != nil {
 		return nil, err
 	}
+	if passring, err = SessionKeyring(); err == nil {
+		pkr = prompt.PassphraseKeyring{Keyring: passring}
+		pkr.Prompt = prompt.NewPrompter(prompt.PassphrasePrompt)
+	}
 	for i, kv := range data {
-		data[i].Value, err = secconf.Decode(kv.Value, kr)
+		if passring != nil {
+			data[i].Value, err = secconf.DecodeVia(kv.Value, kr, pkr)
+		} else {
+			data[i].Value, err = secconf.Decode(kv.Value, kr)
+		}
 		kr.Seek(0, 0)
 		if err != nil {
 			return nil, err
